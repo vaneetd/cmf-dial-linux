@@ -3,12 +3,12 @@
 //! Capture, decode, state machine, mode actions (uinput keys and scroll, logind brightness) and the
 //! overlay (wheel and HUD). Apps and Windows are not built yet.
 //!
-//!   --no-buds   don't touch BlueZ or evdev; drive it from stdin (r l p d, +3, -2)
-//!   --no-ui     no overlay, log only
+//! Run `dial-daemon --help` for the options.
 
 mod actions;
 mod encoder;
 mod event;
+mod install;
 mod machine;
 mod sources;
 mod ui;
@@ -27,6 +27,29 @@ use machine::{Effect, Machine, Phase};
 use sources::Raw;
 use ui::{UiHandle, UiMsg};
 
+const HELP: &str = "dial-daemon: use the CMF Buds Pro 2 Smart Dial as a control surface on COSMIC
+
+USAGE:
+    dial-daemon [OPTIONS]
+    dial-daemon install      install for this user: binary, autostart at login, udev rule (sudo)
+    dial-daemon uninstall    remove all of that
+
+OPTIONS:
+    --no-buds        don't use the earbuds; type r / l (turn), +3 / -2, p (press), d (double press)
+    --no-ui          no overlay, log only
+    --wm-list        print the windows and workspaces the compositor reports, then exit
+    --snapshot DIR   render the wheel and HUD states to PNG files in DIR, then exit
+    -h, --help       show this help
+    -V, --version    show the version";
+
+fn finish(result: Result<(), String>) -> zbus::Result<()> {
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 struct Daemon {
     conn: Connection,
     machine: Machine,
@@ -40,6 +63,13 @@ struct Daemon {
 async fn main() -> zbus::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let has = |f: &str| args.iter().any(|a| a == f);
+    match args.get(1).map(String::as_str) {
+        Some("install") => return finish(install::install()),
+        Some("uninstall") => return finish(install::uninstall()),
+        Some("--help" | "-h" | "help") => return Ok(println!("{HELP}")),
+        Some("--version" | "-V") => return Ok(println!("dial-daemon {}", env!("CARGO_PKG_VERSION"))),
+        _ => {}
+    }
     if let Some(i) = args.iter().position(|a| a == "--snapshot") {
         let dir = args.get(i + 1).map_or("snapshots", |s| s.as_str());
         return match ui::snapshot(std::path::Path::new(dir)) {

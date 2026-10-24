@@ -2,7 +2,7 @@
 
 Source: `probe-A.log` to `probe-D.log`, 2026-10-24, CMF Buds Pro 2 on Pop!_OS 24.04 / COSMIC / BlueZ + PipeWire.
 Run A = nothing playing, B = media playing, C = `--park 0.5` (sink), D = `--park-transport 64`.
-Art confirmed that in run B the playing media app did not pause or skip on press or double press.
+In run B the playing media app did not pause or skip on press or double press.
 
 ## Summary
 
@@ -35,13 +35,13 @@ Art confirmed that in run B the playing media app did not pause or skip on press
 - evdev device `/dev/input/event12` ("CMF Buds Pro 2 (AVRCP)"), delivered as down/up pairs about 200 ms apart for play/pause and the same millisecond for next.
 - A press arrives as `KEY_PLAYCD` or `KEY_PAUSECD` depending on what the buds think the playback state is (they alternate: PAUSECD, PLAYCD, PAUSECD...). Treat both, plus `KEY_PLAYPAUSE` for safety, as **press**.
 - A double press arrives as `KEY_NEXTSONG` only. No stray press event precedes it, so the buds do the double-click detection themselves. The window is inside the buds, so press latency is not measurable from the log.
-- Reading the device needs the ACL (`setfacl`), which resets on reboot. The daemon needs a udev rule or the `input` group. Needs Art's approval.
+- Reading the device needs the ACL (`setfacl`), which resets on reboot. The daemon installs a udev rule (`uaccess`) so no group membership is needed.
 
 ## Not settled
 
 1. **Media players:** settled. They did not react in run B, so `EVIOCGRAB` is not needed (keep it as a fallback if some player does).
 2. **MPRIS:** not probed. evdev works, so MPRIS isn't needed.
-3. **Reconnect:** the buds stayed connected for all four runs. The sink name stayed `bluez_output.3C_B0_ED_33_AA_74.1` and the transport path stayed `.../sep1/fd0`, but a reconnect or a case-lid cycle has not been tried. Plan for the daemon to watch `InterfacesAdded` and `InterfacesRemoved` for `MediaTransport1`, and to re-find the evdev device by name when it vanishes.
+3. **Reconnect:** the buds stayed connected for all four runs. The sink name stayed the same `bluez_output.*` name and the transport path stayed `.../sep1/fd0`, but a reconnect or a case-lid cycle has not been tried. Plan for the daemon to watch `InterfacesAdded` and `InterfacesRemoved` for `MediaTransport1`, and to re-find the evdev device by name when it vanishes.
 4. **Pre-park volume:** the buds' volume is left at 64 after Run D. Restoring the user's real volume when leaving a mode is a design decision for Phase 1.
 
 ## Recommended capture path

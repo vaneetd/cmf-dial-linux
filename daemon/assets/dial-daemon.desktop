@@ -2,6 +2,6 @@
 Type=Application
 Name=Dial
 Comment=Smart Dial controls for CMF Buds Pro 2
-Exec=dial-daemon
+Exec=@EXEC@
 Terminal=false
 X-GNOME-Autostart-enabled=true

@@ -56,7 +56,6 @@ impl Machine {
         }
     }
 
-    #[allow(dead_code)]
     pub fn phase(&self) -> Phase {
         self.phase
     }

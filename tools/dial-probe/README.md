@@ -13,7 +13,7 @@ No installs needed on Pop!_OS 24.04 (python3, dbus-python, PyGObject, pactl).
 Sources: `[bluez]` MediaTransport1 Volume (0-127) and device state, `[sink]` Bluetooth sink volume from
 PipeWire, `[evdev]` the buds' virtual AVRCP keyboard (press, double press).
 
-## Runs for Art
+## Runs
 
 Pair and connect the buds, set Nothing X gestures (press = Play/Pause, double press = Next, rotate = Volume),
 **close the case lid**, choose the buds as sound output. Save each log: `... | tee -i ~/probe-A.log`.

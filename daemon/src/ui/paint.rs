@@ -1,11 +1,9 @@
 //! Software painting of the dial and the HUD pill with tiny-skia, following
 //! `../dial/design/DESIGN.md` (dark theme). The dial is drawn in a 260 x 260 space.
 
-use std::f32::consts::PI;
-
 use tiny_skia::{
-    BlendMode, Color, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, Mask, MaskType, Paint, Path,
-    PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient, Rect, SpreadMode, Stroke, Transform,
+    Color, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, Mask, MaskType, Paint, Path,
+    PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient, SpreadMode, Stroke, Transform,
 };
 
 use crate::event::ModeId;
@@ -16,7 +14,7 @@ pub const SURFACE_H: u32 = 292;
 const DIAL_X: f32 = 20.0;
 const DIAL_Y: f32 = 12.0;
 
-const GAP_DEG: f32 = 48.0;
+pub const GAP_DEG: f32 = 48.0;
 pub const SEGMENT_DEG: f32 = (360.0 - GAP_DEG) / 9.0;
 const START_DEG: f32 = GAP_DEG / 2.0;
 const C: f32 = 130.0;
@@ -504,9 +502,4 @@ pub fn draw_text(pm: &mut Pixmap, font: &fontdue::Font, px: f32, text: &str, x: 
         }
         pen += m.advance_width;
     }
-}
-
-#[allow(dead_code)]
-fn _unused(_: BlendMode, _: Rect) -> f32 {
-    PI
 }

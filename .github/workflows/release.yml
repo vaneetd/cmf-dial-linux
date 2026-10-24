@@ -1,0 +1,29 @@
+name: Release
+
+# Push a tag like v0.1.0 to build the binary and attach it to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --manifest-path daemon/Cargo.toml
+      - name: Build
+        run: cargo build --release --manifest-path daemon/Cargo.toml
+      - name: Package
+        run: |
+          cp daemon/target/release/dial-daemon dial-daemon-x86_64-linux
+          sha256sum dial-daemon-x86_64-linux > dial-daemon-x86_64-linux.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dial-daemon-x86_64-linux
+            dial-daemon-x86_64-linux.sha256

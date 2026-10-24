@@ -54,22 +54,38 @@ The wheel and a small HUD pill are drawn as a non-focus-stealing overlay, so the
 
 - A **CMF Buds Pro 2** (by Nothing), paired and connected. Set the Nothing X gestures to: press = Play/Pause, double press = Next track, rotate = Volume. **The case lid must be closed**, or the dial sends nothing.
 - A Wayland desktop with layer-shell and COSMIC's toplevel and workspace protocols. Developed and tested on **Pop!_OS 24.04 with COSMIC**.
-- BlueZ, systemd-logind, and read access to the earbuds' input device and `/dev/uinput` (the install script sets this up with a udev rule).
-- Rust (via [rustup](https://rustup.rs)) to build.
+- BlueZ, systemd-logind, and read access to the earbuds' input device and `/dev/uinput` (`dial-daemon install` sets this up with a udev rule).
+- Rust (via [rustup](https://rustup.rs)) only if you build from source.
 
 ## Install
 
+Dial is a single binary. `dial-daemon install` does the per-user setup (copies itself to `~/.local/bin`, adds an autostart entry, installs one udev rule with `sudo`), so you don't need a checkout of this repository.
+
+**From a release** (no Rust needed). Replace `OWNER/REPO` with this repository's path:
+
 ```bash
-git clone <this repository>
-cd dial-linux
-./scripts/install.sh
+curl -L -o dial-daemon https://github.com/OWNER/REPO/releases/latest/download/dial-daemon-x86_64-linux
+chmod +x dial-daemon
+./dial-daemon install
 ```
 
-The script builds a release binary, installs it to `~/.local/bin/dial-daemon`, adds an autostart entry so Dial starts when you log in, and installs one udev rule (this is the only step that uses `sudo`). Run `./scripts/install.sh --remove` to undo it.
+**With cargo**, straight from Git:
 
-To start it without logging out again: `nohup dial-daemon >/dev/null 2>&1 &`
+```bash
+cargo install --git https://github.com/OWNER/REPO dial-daemon
+dial-daemon install
+```
 
-## Run from source
+**From a clone**:
+
+```bash
+git clone https://github.com/OWNER/REPO && cd REPO
+cargo run --release --manifest-path daemon/Cargo.toml -- install
+```
+
+Then log out and in, or start it now with `nohup dial-daemon >/dev/null 2>&1 &`. Remove everything with `dial-daemon uninstall`.
+
+## Development
 
 ```bash
 cd daemon
@@ -81,17 +97,16 @@ cargo run --release -- --wm-list       # print the windows and workspaces the co
 cargo test                             # decoder and state-machine tests
 ```
 
-Logs are printed with millisecond timestamps, one line per event, state change and action.
+Logs are printed with millisecond timestamps, one line per event, state change and action. Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed.
 
 ## Repository layout
 
 | Path | What it is |
 |---|---|
-| `daemon/` | The Rust daemon (`src/sources.rs` input, `encoder.rs` turn decoding, `machine.rs` state machine, `actions.rs` mode actions, `wm.rs` windows and workspaces, `ui/` overlay) |
+| `daemon/` | The Rust daemon (`src/sources.rs` input, `encoder.rs` turn decoding, `machine.rs` state machine, `actions.rs` mode actions, `wm.rs` windows and workspaces, `install.rs` setup, `ui/` overlay) |
 | `tools/dial-probe/` | The Python probe that logs every signal the dial produces |
 | `docs/phase0-findings.md` | What the hardware does, measured |
-| `packaging/` | udev rule and autostart entry |
-| `scripts/install.sh` | User-level install and uninstall |
+| `daemon/assets/` | The udev rule and autostart entry that `dial-daemon install` writes |
 
 ## Status and limitations
 

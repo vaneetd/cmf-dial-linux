@@ -8,7 +8,6 @@
 mod icons;
 mod paint;
 
-use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, Region};
@@ -30,13 +29,12 @@ use smithay_client_toolkit::reexports::client::protocol::{wl_output, wl_shm, wl_
 use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 
 use crate::event::{ModeId, log};
-use paint::{Fonts, Hud, Painter, Scene, SEGMENT_DEG, SURFACE_H, SURFACE_W};
+use paint::{Fonts, GAP_DEG, Hud, Painter, Scene, SEGMENT_DEG, SURFACE_H, SURFACE_W};
 
 const HUD_LINGER: Duration = Duration::from_millis(1200);
 const PRESS_FOLD_DELAY: Duration = Duration::from_millis(170);
 const PRESS_ANIM: Duration = Duration::from_millis(560);
 const HUD_AFTER_FOLD: Duration = Duration::from_millis(290);
-const GAP_DEG: f32 = 48.0;
 
 #[derive(Debug)]
 pub enum UiMsg {
@@ -70,7 +68,7 @@ pub fn spawn() -> UiHandle {
     UiHandle(tx)
 }
 
-struct Hud_ {
+struct HudState {
     mode: ModeId,
     text: String,
     level: Option<f32>,
@@ -100,7 +98,7 @@ struct App {
     dial_target: f32,
     press_at: Option<Instant>,
     close_at: Option<Instant>,
-    hud: Option<Hud_>,
+    hud: Option<HudState>,
     last_tick: Instant,
     /// What the last frame showed. A frame is drawn only when this changes; otherwise the
     /// compositor's buffer-release events would keep waking us into redrawing forever.
@@ -208,7 +206,7 @@ impl App {
                 let delay = if self.dial_target > 0.5 || self.close_at.is_some() { HUD_AFTER_FOLD } else { Duration::ZERO };
                 let show_at = now + delay;
                 let t = self.hud.as_ref().filter(|h| h.mode == mode).map_or(0.0, |h| h.t);
-                self.hud = Some(Hud_ { mode, text, level, show_at, hide_at: show_at + HUD_LINGER, t });
+                self.hud = Some(HudState { mode, text, level, show_at, hide_at: show_at + HUD_LINGER, t });
             }
         }
     }
@@ -402,8 +400,7 @@ impl LayerShellHandler for App {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
         log("ui", "layer surface closed by the compositor");
     }
-    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
-        let _ = NonZeroU32::new(configure.new_size.0);
+    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface, _: LayerSurfaceConfigure, _: u32) {
         self.configured = true;
         self.last_drawn = None;
     }
@@ -430,15 +427,6 @@ smithay_client_toolkit::delegate_dispatch2!(App);
 pub fn snapshot(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
     let mut painter = Painter::new(Fonts::load().ok_or("no usable font found")?);
-    {
-        let mut pm = Pixmap::new(SURFACE_W, SURFACE_H).unwrap();
-        let sc = scene(ModeId::Volume, 0.0, Some(("", "62", Some(0.6))));
-        let t = Instant::now();
-        for _ in 0..50 {
-            painter.paint(&mut pm, 1.0, &sc);
-        }
-        println!("paint: {:?} per frame at 1x", t.elapsed() / 50);
-    }
     let shots: Vec<(&str, Scene)> = vec![
         ("wheel-volume", scene(ModeId::Volume, 0.0, None)),
         ("wheel-windows", scene(ModeId::Windows, 0.0, None)),
@@ -463,11 +451,10 @@ pub fn snapshot(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>>
 
 fn scene(mode: ModeId, press: f32, hud: Option<(&str, &str, Option<f32>)>) -> Scene {
     let c = paint::segment_centre(paint::mode_index(mode));
-    let accumulated = if mode == ModeId::Slides { c } else { c };
     Scene {
         dial: 1.0,
-        highlight_deg: accumulated,
-        knob_deg: accumulated,
+        highlight_deg: c,
+        knob_deg: c,
         selected: mode,
         press,
         hud: hud.map(|(_, text, level)| Hud { mode, text: text.into(), level, t: 1.0 }),

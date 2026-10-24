@@ -185,6 +185,10 @@ Things worth knowing before you run it:
 - It was built and tested on one setup (Pop!_OS 24.04 with COSMIC, one pair of CMF Buds Pro 2). Anything else is untested.
 - This is an independent project. It is not affiliated with, endorsed by or supported by Nothing, System76, or the authors of the macOS Dial app.
 
+## Contributing
+
+Contributions are not being accepted at this time. Pull requests and feature requests may not be reviewed. This section will be updated if that changes.
+
 ## License
 
 [MIT](LICENSE)

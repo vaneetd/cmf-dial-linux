@@ -71,24 +71,24 @@ The wheel and a small HUD pill are drawn as a non-focus-stealing overlay, so the
 
 Pick one. All three give you the same single `dial-daemon` binary.
 
-**A. Download a release** (nothing else to install). Replace `OWNER/REPO` with this repository's path:
+**A. Download a release** (nothing else to install).
 
 ```bash
-curl -L -o dial-daemon https://github.com/OWNER/REPO/releases/latest/download/dial-daemon-x86_64-linux
+curl -L -o dial-daemon https://github.com/vaneetd/cmf-dial-linux/releases/latest/download/dial-daemon-x86_64-linux
 chmod +x dial-daemon
 ```
 
 **B. Install with cargo** (needs [Rust](https://rustup.rs)), straight from Git, no clone:
 
 ```bash
-cargo install --git https://github.com/OWNER/REPO dial-daemon
+cargo install --git https://github.com/vaneetd/cmf-dial-linux dial-daemon
 ```
 
 **C. Build from a clone** (needs [Rust](https://rustup.rs)):
 
 ```bash
-git clone https://github.com/OWNER/REPO
-cd REPO/daemon
+git clone https://github.com/vaneetd/cmf-dial-linux
+cd cmf-dial-linux/daemon
 cargo build --release
 ```
 

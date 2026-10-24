@@ -2,7 +2,7 @@
 
 Source: `probe-A.log` to `probe-D.log`, 2026-10-24, CMF Buds Pro 2 on Pop!_OS 24.04 / COSMIC / BlueZ + PipeWire.
 Run A = nothing playing, B = media playing, C = `--park 0.5` (sink), D = `--park-transport 64`.
-Runs A and B were done with gestures only; the logs don't tell us if the media app reacted to the keys (see "Not settled").
+Art confirmed that in run B the playing media app did not pause or skip on press or double press.
 
 ## Summary
 
@@ -39,7 +39,7 @@ Runs A and B were done with gestures only; the logs don't tell us if the media a
 
 ## Not settled
 
-1. **Do media players react to the keys?** The logs don't say whether Spotify or the browser paused or skipped in run B. Art needs to say. If they did, we grab the device with `EVIOCGRAB`, which is only tested by trying it.
+1. **Media players:** settled. They did not react in run B, so `EVIOCGRAB` is not needed (keep it as a fallback if some player does).
 2. **MPRIS:** not probed. evdev works, so MPRIS isn't needed.
 3. **Reconnect:** the buds stayed connected for all four runs. The sink name stayed `bluez_output.3C_B0_ED_33_AA_74.1` and the transport path stayed `.../sep1/fd0`, but a reconnect or a case-lid cycle has not been tried. Plan for the daemon to watch `InterfacesAdded` and `InterfacesRemoved` for `MediaTransport1`, and to re-find the evdev device by name when it vanishes.
 4. **Pre-park volume:** the buds' volume is left at 64 after Run D. Restoring the user's real volume when leaving a mode is a design decision for Phase 1.
@@ -47,6 +47,6 @@ Runs A and B were done with gestures only; the logs don't tell us if the media a
 ## Recommended capture path
 
 - **Turn:** BlueZ `MediaTransport1.Volume` via D-Bus (`zbus`), park with a transport write of 64 in the same handler, echo window 400 ms / +/-2.
-- **Press, double press:** evdev read of the AVRCP device, found by name, with `EVIOCGRAB` if (1) above turns out to be a problem.
+- **Press, double press:** evdev read of the AVRCP device, found by name. No `EVIOCGRAB` needed.
 - **Do not use** the sink volume as an input.
 - Simulated-input source (hotkeys) must exist so UI work doesn't depend on the buds.

@@ -54,7 +54,11 @@ async fn main() -> zbus::Result<()> {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = sleep => {
+                let before = machine.describe();
                 let fx = machine.tick(Instant::now());
+                if before != machine.describe() {
+                    log("state", format!("{before} → {} (idle)", machine.describe()));
+                }
                 apply(fx, &machine, &mut encoder, &conn, transport.as_ref()).await;
             }
             Some(raw) = rx.recv() => {

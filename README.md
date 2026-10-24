@@ -4,6 +4,8 @@ Turn the Smart Dial on a **CMF Buds Pro 2** charging case into a control surface
 
 Double press the dial to open a radial wheel of nine modes. Turn it to pick one, press to choose it. From then on every turn drives that mode (volume, brightness, apps, windows, workspaces, tabs, scroll, undo/redo, slides) until you double press again.
 
+> **Use at your own risk.** This software is provided as is, without warranty. See [Disclaimer](#disclaimer).
+
 This project is inspired by [Dial for macOS](https://github.com/athulrajt/dial) by athulrajt. The interaction model, the mode set and the visual design come from that project. This repository is an independent Linux implementation, built from scratch for Wayland and the COSMIC desktop.
 
 ## How it works
@@ -169,6 +171,19 @@ This is an early project, built around one pair of earbuds and one desktop.
 - The overlay uses the dark theme only.
 - Reconnecting the earbuds while the daemon runs is handled in code but has had little testing.
 - Only COSMIC is supported for Windows, Apps and Workspaces. Other compositors would need their own window-management code.
+
+## Disclaimer
+
+**This software is provided "as is", without warranty of any kind. Everyone who installs or runs it does so entirely at their own risk.** The authors and contributors are not liable for any damage, data loss or other harm that results from using it.
+
+Things worth knowing before you run it:
+
+- It sends **keystrokes and scroll events** to whichever window has focus, for example undo, redo, save, close-tab-style shortcuts and slide keys. A mode picked by mistake can change or save a document.
+- It **changes your screen brightness and the earbuds' volume**. The volume is moved to the midpoint while you use the wheel and modes, so it can jump suddenly. Take the earbuds out of your ears if that matters to you.
+- It **brings windows forward and switches workspaces**.
+- `dial-daemon install` writes a **udev rule** to `/etc/udev/rules.d` with `sudo`, and the program creates virtual input devices through `/dev/uinput`. Read `daemon/assets/70-dial.rules` and the source first if you want to be sure of what it does.
+- It was built and tested on one setup (Pop!_OS 24.04 with COSMIC, one pair of CMF Buds Pro 2). Anything else is untested.
+- This is an independent project. It is not affiliated with, endorsed by or supported by Nothing, System76, or the authors of the macOS Dial app.
 
 ## License
 

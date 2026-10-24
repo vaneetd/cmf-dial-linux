@@ -2,6 +2,8 @@
 name = "dial-daemon"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Use the CMF Buds Pro 2 Smart Dial as a control surface on the COSMIC desktop"
 
 [dependencies]
 chrono = "0.4.45"

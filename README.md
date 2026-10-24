@@ -57,33 +57,85 @@ The wheel and a small HUD pill are drawn as a non-focus-stealing overlay, so the
 - BlueZ, systemd-logind, and read access to the earbuds' input device and `/dev/uinput` (`dial-daemon install` sets this up with a udev rule).
 - Rust (via [rustup](https://rustup.rs)) only if you build from source.
 
-## Install
+## Installation
 
-Dial is a single binary. `dial-daemon install` does the per-user setup (copies itself to `~/.local/bin`, adds an autostart entry, installs one udev rule with `sudo`), so you don't need a checkout of this repository.
+### 1. Prepare the earbuds
 
-**From a release** (no Rust needed). Replace `OWNER/REPO` with this repository's path:
+1. Pair and connect the CMF Buds Pro 2 to your computer (COSMIC Settings → Bluetooth), and choose them as the sound output.
+2. In the Nothing X app on your phone, set the gestures to: **press = Play/Pause, double press = Next track, rotate = Volume**.
+3. Keep the earbuds in the case with **the lid closed** while you use the dial. With the lid open the dial sends nothing.
+
+### 2. Get the program
+
+Pick one. All three give you the same single `dial-daemon` binary.
+
+**A. Download a release** (nothing else to install). Replace `OWNER/REPO` with this repository's path:
 
 ```bash
 curl -L -o dial-daemon https://github.com/OWNER/REPO/releases/latest/download/dial-daemon-x86_64-linux
 chmod +x dial-daemon
-./dial-daemon install
 ```
 
-**With cargo**, straight from Git:
+**B. Install with cargo** (needs [Rust](https://rustup.rs)), straight from Git, no clone:
 
 ```bash
 cargo install --git https://github.com/OWNER/REPO dial-daemon
-dial-daemon install
 ```
 
-**From a clone**:
+**C. Build from a clone** (needs [Rust](https://rustup.rs)):
 
 ```bash
-git clone https://github.com/OWNER/REPO && cd REPO
-cargo run --release --manifest-path daemon/Cargo.toml -- install
+git clone https://github.com/OWNER/REPO
+cd REPO/daemon
+cargo build --release
 ```
 
-Then log out and in, or start it now with `nohup dial-daemon >/dev/null 2>&1 &`. Remove everything with `dial-daemon uninstall`.
+### 3. Set it up
+
+Run the setup once. It asks for your `sudo` password for one step only, the udev rule.
+
+```bash
+./dial-daemon install                    # option A, from the folder you downloaded it to
+dial-daemon install                      # option B
+./target/release/dial-daemon install     # option C, from the daemon/ folder
+```
+
+It does three things:
+
+| Step | Where | Why |
+|---|---|---|
+| Copies the program | `~/.local/bin/dial-daemon` | A fixed place to run it from |
+| Adds an autostart entry | `~/.config/autostart/dial-daemon.desktop` | Starts Dial when you log in |
+| Installs a udev rule (needs `sudo`) | `/etc/udev/rules.d/70-dial.rules` | Lets your user read the earbuds' key device and create virtual input devices, with no group changes |
+
+### 4. Start it
+
+Log out and back in, or start it now:
+
+```bash
+nohup ~/.local/bin/dial-daemon >/dev/null 2>&1 &
+```
+
+Close the case lid, then **double press the dial**. The wheel should appear at the top of the screen.
+
+To see what it is doing, run it in a terminal instead (`dial-daemon`). Every event is logged with a timestamp.
+
+### Uninstall
+
+```bash
+dial-daemon uninstall
+pkill dial-daemon      # stops a copy that is still running
+```
+
+### Troubleshooting
+
+| Problem | What to check |
+|---|---|
+| Nothing happens when you turn or press | The case lid must be closed, and the earbuds connected. Run `dial-daemon` in a terminal and watch for `[bluez]` and `[evdev]` lines. |
+| `no AVRCP input device yet` in the log | The earbuds aren't connected, or the udev rule isn't active. Reconnect them, or run `sudo udevadm trigger --subsystem-match=input`. |
+| `no virtual keyboard` in the log | `/dev/uinput` isn't accessible. Run `dial-daemon install` again, then log out and in. |
+| The wheel never appears but the log shows `[wheel]` lines | Your compositor needs to support the layer-shell protocol. COSMIC does. The log shows `[ui]` errors if the overlay couldn't start. |
+| Volume jumps or the dial feels slow | The earbuds report a turn at most about three times a second. See [docs/phase0-findings.md](docs/phase0-findings.md). |
 
 ## Development
 
@@ -117,6 +169,10 @@ This is an early project, built around one pair of earbuds and one desktop.
 - The overlay uses the dark theme only.
 - Reconnecting the earbuds while the daemon runs is handled in code but has had little testing.
 - Only COSMIC is supported for Windows, Apps and Workspaces. Other compositors would need their own window-management code.
+
+## License
+
+[MIT](LICENSE)
 
 ## Acknowledgements
 

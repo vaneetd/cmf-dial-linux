@@ -4,7 +4,7 @@
 use std::f32::consts::PI;
 
 use tiny_skia::{
-    BlendMode, Color, FillRule, GradientStop, LineCap, LineJoin, Mask, MaskType, Paint, Path,
+    BlendMode, Color, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, Mask, MaskType, Paint, Path,
     PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient, Rect, SpreadMode, Stroke, Transform,
 };
 
@@ -160,26 +160,118 @@ fn soft_shadow_circle(pm: &mut Pixmap, tf: Transform, cx: f32, cy: f32, r: f32, 
     }
 }
 
-pub fn paint(pm: &mut Pixmap, scale: f32, fonts: &Fonts, s: &Scene) {
-    pm.fill(Color::TRANSPARENT);
-    let base = Transform::from_scale(scale, scale);
+/// Draws frames. The parts of the dial that never change (ring, selected-segment sprite, knob
+/// face) are rendered once per scale and composited each frame, so a frame costs about a millisecond.
+pub struct Painter {
+    pub fonts: Fonts,
+    scale: f32,
+    ring: Option<Pixmap>,
+    sel: Option<Pixmap>,
+    knob: Option<Pixmap>,
+    dial_layer: Option<Pixmap>,
+    hud_layer: Option<Pixmap>,
+}
 
-    if s.dial > 0.01 {
-        let mut layer = Pixmap::new(pm.width(), pm.height()).unwrap();
-        paint_dial(&mut layer, scale, fonts, s);
-        // Summon: from above, 70% to 100% scale around the top centre, fading in.
-        let t = ease_out(s.dial);
-        let sc = 0.7 + 0.3 * t;
-        let (px, py) = (C + DIAL_X, DIAL_Y);
-        let tf = base
-            .pre_translate(px, py - 28.0 * (1.0 - t))
-            .pre_scale(sc, sc)
-            .pre_translate(-px, -py);
-        let paint = PixmapPaint { opacity: t, ..PixmapPaint::default() };
-        pm.draw_pixmap(0, 0, layer.as_ref(), &paint, tf.pre_scale(1.0 / scale, 1.0 / scale), None);
+impl Painter {
+    pub fn new(fonts: Fonts) -> Self {
+        Painter { fonts, scale: 0.0, ring: None, sel: None, knob: None, dial_layer: None, hud_layer: None }
     }
-    if let Some(h) = &s.hud {
-        paint_hud(pm, base, scale, fonts, h);
+
+    fn prepare(&mut self, w: u32, h: u32, scale: f32) {
+        if self.scale == scale && self.ring.as_ref().is_some_and(|r| r.width() == w && r.height() == h) {
+            return;
+        }
+        self.scale = scale;
+        let tf = Transform::from_scale(scale, scale).pre_translate(DIAL_X, DIAL_Y);
+        self.ring = Some(build_ring(w, h, tf));
+        self.sel = Some(build_selected(w, h, tf));
+        self.knob = Some(build_knob(w, h, tf));
+        self.dial_layer = Pixmap::new(w, h);
+        self.hud_layer = Pixmap::new(w, h);
+    }
+
+    pub fn paint(&mut self, pm: &mut Pixmap, scale: f32, s: &Scene) {
+        self.prepare(pm.width(), pm.height(), scale);
+        pm.fill(Color::TRANSPARENT);
+        let base = Transform::from_scale(scale, scale);
+
+        if s.dial > 0.01 {
+            let mut layer = self.dial_layer.take().unwrap();
+            layer.fill(Color::TRANSPARENT);
+            self.paint_dial(&mut layer, scale, s);
+            // Summon: from above, 70% to 100% scale around the top centre, fading in.
+            let t = ease_out(s.dial);
+            let sc = 0.7 + 0.3 * t;
+            let (px, py) = (C + DIAL_X, DIAL_Y);
+            let tf = base
+                .pre_translate(px, py - 28.0 * (1.0 - t))
+                .pre_scale(sc, sc)
+                .pre_translate(-px, -py)
+                .pre_scale(1.0 / scale, 1.0 / scale);
+            let paint = PixmapPaint { opacity: t, quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
+            pm.draw_pixmap(0, 0, layer.as_ref(), &paint, tf, None);
+            self.dial_layer = Some(layer);
+        }
+        if let Some(h) = &s.hud {
+            let mut layer = self.hud_layer.take().unwrap();
+            layer.fill(Color::TRANSPARENT);
+            paint_hud(pm, &mut layer, base, scale, &self.fonts, h);
+            self.hud_layer = Some(layer);
+        }
+    }
+
+    fn paint_dial(&self, pm: &mut Pixmap, scale: f32, s: &Scene) {
+        let tf = Transform::from_scale(scale, scale).pre_translate(DIAL_X, DIAL_Y);
+        let centre = ((DIAL_X + C) * scale, (DIAL_Y + C) * scale);
+        let sprite = PixmapPaint { quality: FilterQuality::Bicubic, ..PixmapPaint::default() };
+        let plain = PixmapPaint::default();
+
+        pm.draw_pixmap(0, 0, self.ring.as_ref().unwrap().as_ref(), &plain, Transform::identity(), None);
+
+        // Selected segment: the sprite is drawn at segment 0 and rotated into place.
+        let rot = Transform::from_rotate_at(s.highlight_deg - segment_centre(0), centre.0, centre.1);
+        pm.draw_pixmap(0, 0, self.sel.as_ref().unwrap().as_ref(), &sprite, rot, None);
+
+        // Icons, always upright.
+        for (i, mode) in ModeId::ALL.iter().enumerate() {
+            let (x, y) = polar(90.0, segment_centre(i));
+            let colour = if *mode == s.selected { col::ICON_ACTIVE } else { col::ICON_IDLE };
+            super::icons::draw(pm, tf, *mode, x, y, 18.0, rgb(colour), 1.5);
+        }
+
+        // Knob
+        let press = press_curve(s.press);
+        let sink = 1.0 - 0.08 * press;
+        let shadow_dy = 8.0 - 6.0 * press;
+        soft_shadow_circle(pm, tf, C, C, 49.0 * sink, shadow_dy, 8.0, 0.40);
+        if s.press > 0.0 {
+            let r = 49.0 * (1.0 + 0.24 * s.press);
+            let stroke = Stroke { width: 2.0, ..Stroke::default() };
+            pm.stroke_path(&circle(C, C, r), &solid(rgba(col::GLOW, 0.9 * (1.0 - s.press))), &stroke, tf, None);
+        }
+        let ktf = Transform::from_translate(centre.0, centre.1).pre_scale(sink, sink).pre_translate(-centre.0, -centre.1);
+        pm.draw_pixmap(0, 0, self.knob.as_ref().unwrap().as_ref(), &sprite, ktf, None);
+
+        // Pointer marks: 0 and 180 degrees relative to the knob angle.
+        let ltf = tf.pre_translate(C, C).pre_scale(sink, sink).pre_translate(-C, -C);
+        let mut marks = PathBuilder::new();
+        for off in [0.0, 180.0] {
+            let (x0, y0) = polar(34.0, s.knob_deg + off);
+            let (x1, y1) = polar(41.0, s.knob_deg + off);
+            marks.move_to(x0, y0);
+            marks.line_to(x1, y1);
+        }
+        pm.stroke_path(
+            &marks.finish().unwrap(),
+            &solid(rgb(col::KNOB_INK)),
+            &Stroke { width: 2.0, line_cap: LineCap::Round, ..Stroke::default() },
+            ltf,
+            None,
+        );
+
+        // Label: icon and short name, upright.
+        super::icons::draw(pm, ltf, s.selected, C, 116.0, 18.0, rgb(col::KNOB_INK), 1.5);
+        draw_text(pm, &self.fonts.label, 10.0 * scale, short_label(s.selected), centre.0, (DIAL_Y + 141.0 + 3.5) * scale, col::KNOB_INK, 1.0, Align::Centre);
     }
 }
 
@@ -187,27 +279,18 @@ fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
-fn paint_dial(pm: &mut Pixmap, scale: f32, fonts: &Fonts, s: &Scene) {
-    let tf = Transform::from_scale(scale, scale).pre_translate(DIAL_X, DIAL_Y);
-
-    // Ring shadow
+/// Ring shadow, ring body, well and dividers.
+fn build_ring(w: u32, h: u32, tf: Transform) -> Pixmap {
+    let mut pm = Pixmap::new(w, h).unwrap();
     for i in 0..6 {
         let k = i as f32 / 6.0;
-        let (path, w) = rounded_sector(68.0 - 10.0 * k, 112.0 + 10.0 * k, START_DEG, 360.0 - START_DEG, 10.0);
-        let shadow_tf = tf.pre_translate(0.0, 10.0);
-        fill_rounded(pm, shadow_tf, &(path, w), &solid(rgba(0x000000, 0.07)));
+        let shape = rounded_sector(68.0 - 10.0 * k, 112.0 + 10.0 * k, START_DEG, 360.0 - START_DEG, 10.0);
+        fill_rounded(&mut pm, tf.pre_translate(0.0, 10.0), &shape, &solid(rgba(0x000000, 0.07)));
     }
-
-    // Ring body
     let ring = rounded_sector(68.0, 112.0, START_DEG, 360.0 - START_DEG, 10.0);
-    fill_rounded(pm, tf, &ring, &solid(rgb(col::RING)));
-
-    // Well
+    fill_rounded(&mut pm, tf, &ring, &solid(rgb(col::RING)));
     pm.fill_path(&circle(C, C, 62.0), &solid(rgb(col::WELL)), FillRule::Winding, tf, None);
-
-    // Dividers
-    let mut divider = solid(rgb(col::DIVIDER));
-    divider.anti_alias = true;
+    let divider = solid(rgb(col::DIVIDER));
     for i in 1..9 {
         let a = START_DEG + SEGMENT_DEG * i as f32;
         let (x0, y0) = polar(75.0, a);
@@ -215,18 +298,17 @@ fn paint_dial(pm: &mut Pixmap, scale: f32, fonts: &Fonts, s: &Scene) {
         let mut pb = PathBuilder::new();
         pb.move_to(x0, y0);
         pb.line_to(x1, y1);
-        let stroke = Stroke { width: 1.0, ..Stroke::default() };
-        pm.stroke_path(&pb.finish().unwrap(), &divider, &stroke, tf, None);
+        pm.stroke_path(&pb.finish().unwrap(), &divider, &Stroke { width: 1.0, ..Stroke::default() }, tf, None);
     }
+    pm
+}
 
-    // Selected segment, drawn at segment 0 and rotated into place.
+/// The lifted, hatched segment at position 0.
+fn build_selected(w: u32, h: u32, tf: Transform) -> Pixmap {
+    let mut pm = Pixmap::new(w, h).unwrap();
     let sel = rounded_sector(67.0, 118.0, START_DEG, START_DEG + SEGMENT_DEG, 6.0);
-    let rot = Transform::from_rotate_at(s.highlight_deg - segment_centre(0), C, C);
-    let sel_tf = tf.pre_concat(rot);
-    fill_rounded(pm, sel_tf, &sel, &solid(rgb(col::SEGMENT_ACTIVE)));
-    // Hatch stripes clipped to the segment.
-    if let Some(mask) = shape_mask(pm.width(), pm.height(), sel_tf, &sel) {
-        let hatch = solid(rgba(col::HATCH, 0.6));
+    fill_rounded(&mut pm, tf, &sel, &solid(rgb(col::SEGMENT_ACTIVE)));
+    if let Some(mask) = shape_mask(w, h, tf, &sel) {
         let mut pb = PathBuilder::new();
         let mut off = -260.0;
         while off < 260.0 {
@@ -234,34 +316,15 @@ fn paint_dial(pm: &mut Pixmap, scale: f32, fonts: &Fonts, s: &Scene) {
             pb.line_to(off + 260.0, 0.0);
             off += 5.0;
         }
-        let stroke = Stroke { width: 1.6, ..Stroke::default() };
-        pm.stroke_path(&pb.finish().unwrap(), &hatch, &stroke, sel_tf, Some(&mask));
+        pm.stroke_path(&pb.finish().unwrap(), &solid(rgba(col::HATCH, 0.6)), &Stroke { width: 1.6, ..Stroke::default() }, tf, Some(&mask));
     }
+    pm
+}
 
-    // Icons, always upright.
-    for (i, mode) in ModeId::ALL.iter().enumerate() {
-        let (x, y) = polar(90.0, segment_centre(i));
-        let selected = *mode == s.selected;
-        let colour = if selected { col::ICON_ACTIVE } else { col::ICON_IDLE };
-        let size = if selected { 18.0 } else { 18.0 };
-        super::icons::draw(pm, tf, *mode, x, y, size, rgb(colour), 1.5);
-    }
-
-    // Knob
-    let sink = 1.0 - 0.08 * press_curve(s.press);
-    let ktf = tf.pre_translate(C, C).pre_scale(sink, sink).pre_translate(-C, -C);
-    let shadow_dy = 8.0 - 6.0 * press_curve(s.press);
-    soft_shadow_circle(pm, tf, C, C, 49.0 * sink, shadow_dy, 8.0, 0.40);
-
-    // Glow pulse
-    if s.press > 0.0 {
-        let p = s.press;
-        let r = 49.0 * (1.0 + 0.24 * p);
-        let stroke = Stroke { width: 2.0, ..Stroke::default() };
-        pm.stroke_path(&circle(C, C, r), &solid(rgba(col::GLOW, 0.9 * (1.0 - p))), &stroke, tf, None);
-    }
-
-    pm.fill_path(&circle(C, C, 49.0), &solid(rgb(col::KNOB_KNURL)), FillRule::Winding, ktf, None);
+/// Knurled band, face gradient, inner rim and the upper-left rim light.
+fn build_knob(w: u32, h: u32, tf: Transform) -> Pixmap {
+    let mut pm = Pixmap::new(w, h).unwrap();
+    pm.fill_path(&circle(C, C, 49.0), &solid(rgb(col::KNOB_KNURL)), FillRule::Winding, tf, None);
     let mut teeth = PathBuilder::new();
     for i in 0..90 {
         let a = i as f32 * 4.0;
@@ -270,28 +333,29 @@ fn paint_dial(pm: &mut Pixmap, scale: f32, fonts: &Fonts, s: &Scene) {
         teeth.move_to(x0, y0);
         teeth.line_to(x1, y1);
     }
-    pm.stroke_path(&teeth.finish().unwrap(), &solid(rgb(col::KNOB_FACE)), &Stroke { width: 1.1, ..Stroke::default() }, ktf, None);
+    pm.stroke_path(&teeth.finish().unwrap(), &solid(rgb(col::KNOB_FACE)), &Stroke { width: 1.1, ..Stroke::default() }, tf, None);
 
+    let focus = Point::from_xy(C - 44.0 * 0.24, C - 44.0 * 0.36);
     let grad = RadialGradient::new(
-        Point::from_xy(C - 44.0 * 0.24, C - 44.0 * 0.36),
+        focus,
         0.0,
-        Point::from_xy(C - 44.0 * 0.24, C - 44.0 * 0.36),
+        focus,
         44.0 * 1.35,
         vec![GradientStop::new(0.0, rgb(col::KNOB_FACE)), GradientStop::new(1.0, rgb(col::KNOB_SHADE))],
         SpreadMode::Pad,
         Transform::identity(),
     );
-    if let Some(g) = grad {
-        let mut p = Paint::default();
-        p.shader = g;
-        p.anti_alias = true;
-        pm.fill_path(&circle(C, C, 44.0), &p, FillRule::Winding, ktf, None);
-    } else {
-        pm.fill_path(&circle(C, C, 44.0), &solid(rgb(col::KNOB_FACE)), FillRule::Winding, ktf, None);
+    match grad {
+        Some(g) => {
+            let mut p = Paint::default();
+            p.shader = g;
+            p.anti_alias = true;
+            pm.fill_path(&circle(C, C, 44.0), &p, FillRule::Winding, tf, None);
+        }
+        None => pm.fill_path(&circle(C, C, 44.0), &solid(rgb(col::KNOB_FACE)), FillRule::Winding, tf, None),
     }
-    pm.stroke_path(&circle(C, C, 38.0), &solid(rgb(col::KNOB_SHADE)), &Stroke { width: 1.0, ..Stroke::default() }, ktf, None);
+    pm.stroke_path(&circle(C, C, 38.0), &solid(rgb(col::KNOB_SHADE)), &Stroke { width: 1.0, ..Stroke::default() }, tf, None);
 
-    // Rim light, upper left, doesn't rotate.
     let mut arc = PathBuilder::new();
     let mut a = 280.0;
     let (x, y) = polar(43.5, a);
@@ -305,30 +369,10 @@ fn paint_dial(pm: &mut Pixmap, scale: f32, fonts: &Fonts, s: &Scene) {
         &arc.finish().unwrap(),
         &solid(rgba(col::GLOW, 0.55)),
         &Stroke { width: 2.0, line_cap: LineCap::Round, ..Stroke::default() },
-        ktf,
+        tf,
         None,
     );
-
-    // Pointer marks: 0 and 180 degrees relative to the knob angle.
-    let mut marks = PathBuilder::new();
-    for off in [0.0, 180.0] {
-        let (x0, y0) = polar(34.0, s.knob_deg + off);
-        let (x1, y1) = polar(41.0, s.knob_deg + off);
-        marks.move_to(x0, y0);
-        marks.line_to(x1, y1);
-    }
-    pm.stroke_path(
-        &marks.finish().unwrap(),
-        &solid(rgb(col::KNOB_INK)),
-        &Stroke { width: 2.0, line_cap: LineCap::Round, ..Stroke::default() },
-        ktf,
-        None,
-    );
-
-    // Label: icon and short name, upright.
-    super::icons::draw(pm, ktf, s.selected, C, 116.0, 18.0, rgb(col::KNOB_INK), 1.5);
-    let label = short_label(s.selected);
-    draw_text(pm, &fonts.label, 10.0 * scale, label, (DIAL_X + C * sink + C * (1.0 - sink)) * scale, (DIAL_Y + 141.0 + 3.5) * scale, col::KNOB_INK, 1.0, Align::Centre);
+    pm
 }
 
 fn press_curve(p: f32) -> f32 {
@@ -362,7 +406,7 @@ fn shape_mask(w: u32, h: u32, tf: Transform, shape: &(Path, f32)) -> Option<Mask
     Some(Mask::from_pixmap(tmp.as_ref(), MaskType::Alpha))
 }
 
-fn paint_hud(pm: &mut Pixmap, base: Transform, scale: f32, fonts: &Fonts, h: &Hud) {
+fn paint_hud(pm: &mut Pixmap, layer: &mut Pixmap, base: Transform, scale: f32, fonts: &Fonts, h: &Hud) {
     let t = ease_out(h.t);
     let label = h.mode.label();
     let label_w = text_width(&fonts.label, 12.0 * scale, label) / scale;
@@ -381,10 +425,6 @@ fn paint_hud(pm: &mut Pixmap, base: Transform, scale: f32, fonts: &Fonts, h: &Hu
     let sc = 0.9 + 0.1 * t;
     let tf = base.pre_translate(cx, y).pre_scale(sc, sc).pre_translate(-cx, -y);
 
-    let mut layer = match Pixmap::new(pm.width(), pm.height()) {
-        Some(l) => l,
-        None => return,
-    };
     let lt = Transform::from_scale(scale, scale);
     // shadow
     for i in 0..5 {
@@ -397,9 +437,9 @@ fn paint_hud(pm: &mut Pixmap, base: Transform, scale: f32, fonts: &Fonts, h: &Hu
     layer.stroke_path(&body, &solid(rgb(col::CARD_BORDER)), &Stroke { width: 1.0, ..Stroke::default() }, lt, None);
 
     let mid = y + ht / 2.0;
-    super::icons::draw(&mut layer, lt, h.mode, x + 14.0 + 8.0, mid, 16.0, rgb(col::INK), 1.5);
+    super::icons::draw(layer, lt, h.mode, x + 14.0 + 8.0, mid, 16.0, rgb(col::INK), 1.5);
     let mut cursor = x + 14.0 + 16.0 + 8.0;
-    draw_text(&mut layer, &fonts.label, 12.0 * scale, label, cursor * scale, (mid + 4.2) * scale, col::INK, 1.0, Align::Left);
+    draw_text(layer, &fonts.label, 12.0 * scale, label, cursor * scale, (mid + 4.2) * scale, col::INK, 1.0, Align::Left);
     cursor += label_w + gap;
     if let Some(level) = h.level {
         let track = pill(cursor, mid - 2.0, 72.0, 4.0, 2.0);
@@ -409,7 +449,7 @@ fn paint_hud(pm: &mut Pixmap, base: Transform, scale: f32, fonts: &Fonts, h: &Hu
         cursor += 72.0 + 10.0;
     }
     if !h.text.is_empty() {
-        draw_text(&mut layer, &fonts.mono, 12.0 * scale, &h.text, cursor * scale, (mid + 4.2) * scale, col::INK_MUTED, 1.0, Align::Left);
+        draw_text(layer, &fonts.mono, 12.0 * scale, &h.text, cursor * scale, (mid + 4.2) * scale, col::INK_MUTED, 1.0, Align::Left);
     }
     let paint = PixmapPaint { opacity: t, ..PixmapPaint::default() };
     pm.draw_pixmap(0, 0, layer.as_ref(), &paint, tf.pre_scale(1.0 / scale, 1.0 / scale), None);

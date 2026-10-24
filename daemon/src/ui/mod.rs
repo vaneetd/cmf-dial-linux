@@ -30,7 +30,7 @@ use smithay_client_toolkit::reexports::client::protocol::{wl_output, wl_shm, wl_
 use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 
 use crate::event::{ModeId, log};
-use paint::{Fonts, Hud, Scene, SEGMENT_DEG, SURFACE_H, SURFACE_W};
+use paint::{Fonts, Hud, Painter, Scene, SEGMENT_DEG, SURFACE_H, SURFACE_W};
 
 const HUD_LINGER: Duration = Duration::from_millis(1200);
 const PRESS_FOLD_DELAY: Duration = Duration::from_millis(170);
@@ -86,9 +86,11 @@ struct App {
     pool: SlotPool,
     layer: LayerSurface,
     configured: bool,
-    mapped: bool,
+    /// Showing a fully transparent frame. The surface is never unmapped: attaching a null buffer
+    /// resets a layer surface's size and anchor, and the compositor then kills the connection.
+    blank: bool,
     scale: i32,
-    fonts: Fonts,
+    painter: Painter,
 
     selected: ModeId,
     highlight: f32,
@@ -100,6 +102,10 @@ struct App {
     close_at: Option<Instant>,
     hud: Option<Hud_>,
     last_tick: Instant,
+    /// What the last frame showed. A frame is drawn only when this changes; otherwise the
+    /// compositor's buffer-release events would keep waking us into redrawing forever.
+    last_drawn: Option<[f32; 6]>,
+    last_draw: Instant,
 }
 
 fn run(rx: Channel<UiMsg>) -> Result<(), Box<dyn std::error::Error>> {
@@ -132,9 +138,9 @@ fn run(rx: Channel<UiMsg>) -> Result<(), Box<dyn std::error::Error>> {
         pool,
         layer,
         configured: false,
-        mapped: false,
+        blank: false,
         scale: 1,
-        fonts,
+        painter: Painter::new(fonts),
         selected: ModeId::Volume,
         highlight: paint::segment_centre(0),
         highlight_target: paint::segment_centre(0),
@@ -145,10 +151,12 @@ fn run(rx: Channel<UiMsg>) -> Result<(), Box<dyn std::error::Error>> {
         close_at: None,
         hud: None,
         last_tick: Instant::now(),
+        last_drawn: None,
+        last_draw: Instant::now(),
     };
 
     let mut event_loop: EventLoop<App> = EventLoop::try_new()?;
-    WaylandSource::new(conn, event_queue).insert(event_loop.handle())?;
+    WaylandSource::new(conn.clone(), event_queue).insert(event_loop.handle())?;
     event_loop
         .handle()
         .insert_source(rx, |event, _, app| match event {
@@ -161,6 +169,9 @@ fn run(rx: Channel<UiMsg>) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let timeout = app.next_timeout();
         event_loop.dispatch(timeout, &mut app)?;
+        if let Some(err) = conn.protocol_error() {
+            return Err(format!("wayland protocol error: {err}").into());
+        }
         app.tick(&qh);
     }
 }
@@ -168,6 +179,7 @@ fn run(rx: Channel<UiMsg>) -> Result<(), Box<dyn std::error::Error>> {
 impl App {
     fn on_msg(&mut self, msg: UiMsg) {
         let now = Instant::now();
+        self.last_drawn = None;
         match msg {
             UiMsg::Wheel(Some(mode)) => {
                 self.close_at = None;
@@ -230,10 +242,15 @@ impl App {
     }
 
     fn animating(&self) -> bool {
+        let hud_moving = self.hud.as_ref().is_some_and(|h| {
+            let now = Instant::now();
+            let target = if now >= h.show_at && now < h.hide_at { 1.0 } else { 0.0 };
+            h.t != target
+        });
         (self.dial - self.dial_target).abs() > 0.002
             || (self.highlight - self.highlight_target).abs() > 0.05
             || self.press_at.is_some_and(|p| p.elapsed() < PRESS_ANIM)
-            || self.hud.as_ref().is_some_and(|h| h.t > 0.001 && h.t < 0.999 || Instant::now() < h.hide_at && Instant::now() >= h.show_at && h.t < 0.999)
+            || hud_moving
     }
 
     fn next_timeout(&self) -> Option<Duration> {
@@ -251,6 +268,10 @@ impl App {
 
     fn tick(&mut self, qh: &QueueHandle<App>) {
         let now = Instant::now();
+        // Buffer-release events wake the loop between frames; hold the pace to about 60 fps.
+        if self.animating() && now.duration_since(self.last_draw) < Duration::from_millis(12) {
+            return;
+        }
         let dt = now.duration_since(self.last_tick).as_secs_f32().min(0.1);
         self.last_tick = now;
 
@@ -273,8 +294,12 @@ impl App {
         }
         if let Some(h) = &mut self.hud {
             let visible = now >= h.show_at && now < h.hide_at;
-            h.t = approach(h.t, if visible { 1.0 } else { 0.0 }, 0.05);
-            if now >= h.hide_at && h.t < 0.01 {
+            let target = if visible { 1.0 } else { 0.0 };
+            h.t = approach(h.t, target, 0.05);
+            if (h.t - target).abs() < 0.002 {
+                h.t = target;
+            }
+            if now >= h.hide_at && h.t == 0.0 {
                 self.hud = None;
             }
         }
@@ -289,14 +314,27 @@ impl App {
         if !self.configured {
             return;
         }
+        let key = [
+            self.dial,
+            self.highlight,
+            self.press_progress(),
+            self.hud.as_ref().map_or(-1.0, |h| h.t),
+            self.hud.as_ref().map_or(0.0, |h| h.text.len() as f32 + h.level.unwrap_or(0.0)),
+            paint::mode_index(self.selected) as f32,
+        ];
+        if self.last_drawn == Some(key) {
+            return;
+        }
+        self.last_drawn = Some(key);
+        self.last_draw = Instant::now();
         if !self.visible() {
-            if self.mapped {
-                self.layer.wl_surface().attach(None, 0, 0);
-                self.layer.commit();
-                self.mapped = false;
+            if !self.blank {
+                self.present(&Pixmap::new(SURFACE_W, SURFACE_H).unwrap(), 1);
+                self.blank = true;
             }
             return;
         }
+        self.blank = false;
         let scale = self.scale.max(1);
         let (w, h) = (SURFACE_W as i32 * scale, SURFACE_H as i32 * scale);
         let Some(mut pm) = Pixmap::new(w as u32, h as u32) else { return };
@@ -313,8 +351,13 @@ impl App {
                 t: h.t,
             }),
         };
-        paint::paint(&mut pm, scale as f32, &self.fonts, &scene);
+        self.painter.paint(&mut pm, scale as f32, &scene);
 
+        self.present(&pm, scale);
+    }
+
+    fn present(&mut self, pm: &Pixmap, scale: i32) {
+        let (w, h) = (pm.width() as i32, pm.height() as i32);
         let stride = w * 4;
         let Ok((buffer, canvas)) = self.pool.create_buffer(w, h, stride, wl_shm::Format::Argb8888) else {
             return;
@@ -331,7 +374,6 @@ impl App {
         surface.damage_buffer(0, 0, w, h);
         if buffer.attach_to(surface).is_ok() {
             self.layer.commit();
-            self.mapped = true;
         }
     }
 }
@@ -339,6 +381,7 @@ impl App {
 impl CompositorHandler for App {
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, new_factor: i32) {
         self.scale = new_factor.max(1);
+        self.last_drawn = None;
     }
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
@@ -362,6 +405,7 @@ impl LayerShellHandler for App {
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
         let _ = NonZeroU32::new(configure.new_size.0);
         self.configured = true;
+        self.last_drawn = None;
     }
 }
 
@@ -385,7 +429,16 @@ smithay_client_toolkit::delegate_dispatch2!(App);
 /// `--snapshot DIR`: renders the main states to PNGs (2x, on a dark ground) for design review.
 pub fn snapshot(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
-    let fonts = Fonts::load().ok_or("no usable font found")?;
+    let mut painter = Painter::new(Fonts::load().ok_or("no usable font found")?);
+    {
+        let mut pm = Pixmap::new(SURFACE_W, SURFACE_H).unwrap();
+        let sc = scene(ModeId::Volume, 0.0, Some(("", "62", Some(0.6))));
+        let t = Instant::now();
+        for _ in 0..50 {
+            painter.paint(&mut pm, 1.0, &sc);
+        }
+        println!("paint: {:?} per frame at 1x", t.elapsed() / 50);
+    }
     let shots: Vec<(&str, Scene)> = vec![
         ("wheel-volume", scene(ModeId::Volume, 0.0, None)),
         ("wheel-windows", scene(ModeId::Windows, 0.0, None)),
@@ -399,7 +452,7 @@ pub fn snapshot(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>>
         let scale = 2;
         let (w, h) = (SURFACE_W * scale, SURFACE_H * scale);
         let mut pm = Pixmap::new(w, h).unwrap();
-        paint::paint(&mut pm, scale as f32, &fonts, &sc);
+        painter.paint(&mut pm, scale as f32, &sc);
         let mut bg = Pixmap::new(w, h).unwrap();
         bg.fill(tiny_skia::Color::from_rgba8(0x1e, 0x20, 0x24, 255));
         bg.draw_pixmap(0, 0, pm.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);

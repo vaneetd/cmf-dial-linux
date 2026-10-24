@@ -1,9 +1,11 @@
 //! dial-daemon: the Smart Dial on a CMF Buds Pro 2 case as events for the desktop.
 //!
-//! Phase 1 scope: capture, decode, state machine. Mode actions only log what they would do.
+//! Capture, decode, state machine, and the mode actions (uinput keys and scroll, wpctl, brightnessctl).
+//! Apps and Windows are not built yet.
 //!
 //!   --no-buds   don't touch BlueZ or evdev; drive it from stdin (r l p d, +3, -2)
 
+mod actions;
 mod encoder;
 mod event;
 mod machine;
@@ -15,6 +17,7 @@ use tokio::sync::mpsc;
 use zbus::Connection;
 use zbus::OwnedObjectPath;
 
+use actions::Actions;
 use encoder::Encoder;
 use event::{DialEvent, log};
 use machine::{Effect, Machine};
@@ -42,6 +45,7 @@ async fn main() -> zbus::Result<()> {
 
     let mut machine = Machine::new();
     let mut encoder = Encoder::default();
+    let mut actions = Actions::new(conn.clone());
     let mut transport: Option<OwnedObjectPath> = None;
 
     loop {
@@ -59,7 +63,7 @@ async fn main() -> zbus::Result<()> {
                 if before != machine.describe() {
                     log("state", format!("{before} → {} (idle)", machine.describe()));
                 }
-                apply(fx, &machine, &mut encoder, &conn, transport.as_ref()).await;
+                apply(fx, &mut encoder, &mut actions, &conn, transport.as_ref()).await;
             }
             Some(raw) = rx.recv() => {
                 let now = Instant::now();
@@ -85,11 +89,11 @@ async fn main() -> zbus::Result<()> {
                             write(&conn, transport.as_ref(), w).await;
                         }
                         match d.steps {
-                            Some(steps) => dispatch(DialEvent::Turn(steps), "bluez", &mut machine, &mut encoder, &conn, transport.as_ref()).await,
+                            Some(steps) => dispatch(DialEvent::Turn(steps), "bluez", &mut machine, &mut encoder, &mut actions, &conn, transport.as_ref()).await,
                             None => log("encoder", format!("volume {v}: echo or no change")),
                         }
                     }
-                    Raw::Dial(e, src) => dispatch(e, src, &mut machine, &mut encoder, &conn, transport.as_ref()).await,
+                    Raw::Dial(e, src) => dispatch(e, src, &mut machine, &mut encoder, &mut actions, &conn, transport.as_ref()).await,
                 }
             }
         }
@@ -103,6 +107,7 @@ async fn dispatch(
     source: &str,
     machine: &mut Machine,
     encoder: &mut Encoder,
+    actions: &mut Actions,
     conn: &Connection,
     transport: Option<&OwnedObjectPath>,
 ) {
@@ -112,10 +117,10 @@ async fn dispatch(
     if before != machine.describe() {
         log("state", format!("{before} → {}", machine.describe()));
     }
-    apply(fx, machine, encoder, conn, transport).await;
+    apply(fx, encoder, actions, conn, transport).await;
 }
 
-async fn apply(fx: Vec<Effect>, machine: &Machine, encoder: &mut Encoder, conn: &Connection, transport: Option<&OwnedObjectPath>) {
+async fn apply(fx: Vec<Effect>, encoder: &mut Encoder, actions: &mut Actions, conn: &Connection, transport: Option<&OwnedObjectPath>) {
     for effect in fx {
         match effect {
             Effect::SetParking(on) => {
@@ -126,13 +131,24 @@ async fn apply(fx: Vec<Effect>, machine: &Machine, encoder: &mut Encoder, conn: 
             }
             Effect::Wheel(Some(m)) => log("wheel", format!("open, selected {}", m.label())),
             Effect::Wheel(None) => log("wheel", "closed"),
-            Effect::Activate(m) => log("mode", format!("{}: activate (would act here)", m.label())),
-            Effect::Deactivate(m) => log("mode", format!("{}: deactivate", m.label())),
-            Effect::ModeTurn(m, n) => log("mode", format!("{}: turn {n:+} (would act here)", m.label())),
-            Effect::ModePress(m) => log("mode", format!("{}: press (would act here)", m.label())),
+            Effect::Activate(m) => {
+                let hud = actions.activate(m).await;
+                log("mode", format!("{}: activate → {hud}", m.label()));
+            }
+            Effect::Deactivate(m) => {
+                actions.deactivate(m);
+                log("mode", format!("{}: deactivate", m.label()));
+            }
+            Effect::ModeTurn(m, n) => {
+                let hud = actions.turn(m, n).await;
+                log("mode", format!("{}: turn {n:+} → {hud}", m.label()));
+            }
+            Effect::ModePress(m) => {
+                let hud = actions.press(m).await;
+                log("mode", format!("{}: press → {hud}", m.label()));
+            }
         }
     }
-    let _ = machine;
 }
 
 /// Park again after a reconnect.

@@ -1,0 +1,4 @@
+# Dial for Linux: let the logged-in user read the buds' AVRCP key device and create virtual
+# keyboard/wheel devices, without adding them to the `input` group.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="CMF Buds Pro 2 (AVRCP)", TAG+="uaccess"
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

@@ -12,6 +12,7 @@ mod event;
 mod machine;
 mod sources;
 mod ui;
+mod wm;
 
 use std::time::Instant;
 
@@ -46,6 +47,18 @@ async fn main() -> zbus::Result<()> {
             Err(e) => Ok(eprintln!("snapshot failed: {e}")),
         };
     }
+    if has("--wm-list") {
+        let wm = wm::spawn();
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let snap = wm.snapshot();
+        for w in &snap.windows {
+            println!("window {} app={:?} title={:?} min={} active={} recency={}", w.id, w.app_id, w.title, w.minimized, w.activated, w.recency);
+        }
+        for (i, w) in snap.workspaces.iter().enumerate() {
+            println!("workspace {i} name={:?} active={}", w.name, w.active);
+        }
+        return Ok(());
+    }
     let (tx, mut rx) = mpsc::unbounded_channel::<Raw>();
 
     log("daemon", "dial-daemon starting. Lid must be CLOSED for the dial to send anything. Ctrl-C to stop.");
@@ -66,7 +79,7 @@ async fn main() -> zbus::Result<()> {
     let mut d = Daemon {
         machine: Machine::new(),
         encoder: Encoder::default(),
-        actions: Actions::new(conn.clone()),
+        actions: Actions::new(conn.clone(), wm::spawn()),
         ui: (!has("--no-ui")).then(ui::spawn),
         transport: None,
         conn,

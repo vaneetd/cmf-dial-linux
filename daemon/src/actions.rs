@@ -4,19 +4,29 @@
 //!
 //! Shortcuts are the ones the apps and COSMIC use by default (`/usr/share/cosmic/.../defaults`).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::Connection;
 
 use crate::event::{ModeId, log};
+use crate::wm::{Snapshot, Wm};
 
 const LINES_PER_DETENT: i32 = 3;
 const BRIGHTNESS_STEP_PERCENT: u32 = 6;
 
 pub struct Actions {
     system: Connection,
+    wm: Wm,
+    /// Windows mode: window ids, most recent first, and where the dial is in them.
+    windows: Vec<u32>,
+    window_idx: usize,
+    /// Apps mode: (name, the app's most recent window), most recent first.
+    apps: Vec<(String, u32)>,
+    app_idx: usize,
+    /// Workspace we just asked for, so quick detents add up before the compositor reports back.
+    ws_pending: Option<(usize, Instant)>,
     keys: Option<VirtualDevice>,
     wheel: Option<VirtualDevice>,
     scroll_sideways: bool,
@@ -24,13 +34,13 @@ pub struct Actions {
 }
 
 impl Actions {
-    pub fn new(system: Connection) -> Self {
+    pub fn new(system: Connection, wm: Wm) -> Self {
         let keys = keyboard().map_err(|e| log("uinput", format!("no virtual keyboard: {e}"))).ok();
         let wheel = mouse().map_err(|e| log("uinput", format!("no virtual wheel: {e}"))).ok();
         if keys.is_some() && wheel.is_some() {
             log("uinput", "virtual keyboard and wheel ready");
         }
-        Actions { system, keys, wheel, scroll_sideways: false, presenting: false }
+        Actions { system, wm, windows: Vec::new(), window_idx: 0, apps: Vec::new(), app_idx: 0, ws_pending: None, keys, wheel, scroll_sideways: false, presenting: false }
     }
 
     pub async fn activate(&mut self, mode: ModeId) -> String {
@@ -39,6 +49,23 @@ impl Actions {
                 Some(p) => format!("{p}%"),
                 None => "brightness unavailable".into(),
             },
+            ModeId::Windows => {
+                self.windows = self.wm.snapshot().windows.iter().map(|w| w.id).collect();
+                self.window_idx = 0;
+                format!("{} windows", self.windows.len())
+            }
+            ModeId::Apps => {
+                self.apps = apps(&self.wm.snapshot());
+                self.app_idx = 0;
+                self.apps.first().map_or_else(|| "no apps".into(), |(name, _)| format!("{name} 1/{}", self.apps.len()))
+            }
+            ModeId::Desktops => {
+                let snap = self.wm.snapshot();
+                match snap.active_workspace() {
+                    Some(i) => format!("{} / {}", i + 1, snap.workspaces.len()),
+                    None => String::new(),
+                }
+            }
             _ => String::new(),
         }
     }
@@ -85,9 +112,24 @@ impl Actions {
                 (if forward { "Next slide" } else { "Previous slide" }).into()
             }
             ModeId::Desktops => {
-                let arrow = if forward { KeyCode::KEY_RIGHT } else { KeyCode::KEY_LEFT };
-                self.tap_n(&[KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTCTRL, arrow], n);
-                (if forward { "Next workspace" } else { "Previous workspace" }).into()
+                let snap = self.wm.snapshot();
+                let n = snap.workspaces.len();
+                let current = self
+                    .ws_pending
+                    .filter(|(_, at)| at.elapsed() < Duration::from_millis(700))
+                    .map(|(i, _)| i)
+                    .or_else(|| snap.active_workspace());
+                match current {
+                    Some(cur) if n > 0 => {
+                        let target = (cur as i32 + steps).clamp(0, n as i32 - 1) as usize;
+                        if target != cur {
+                            self.wm.go_to_workspace(target);
+                        }
+                        self.ws_pending = Some((target, Instant::now()));
+                        format!("{} / {n}", target + 1)
+                    }
+                    _ => "no workspaces".into(),
+                }
             }
             ModeId::Scroll => {
                 self.scroll(steps * LINES_PER_DETENT);
@@ -99,7 +141,25 @@ impl Actions {
                 };
                 format!("{arrow} {} lines", n as i32 * LINES_PER_DETENT)
             }
-            ModeId::Apps | ModeId::Windows => format!("{}: not built yet", mode.label()),
+            ModeId::Windows => {
+                if self.windows.is_empty() {
+                    return "no windows".into();
+                }
+                let n = self.windows.len() as i32;
+                self.window_idx = (self.window_idx as i32 + steps).rem_euclid(n) as usize;
+                let id = self.windows[self.window_idx];
+                self.wm.activate(id);
+                let title = self.wm.snapshot().windows.iter().find(|w| w.id == id).map(|w| shorten(&w.title, 30)).unwrap_or_default();
+                format!("{title} · {}/{n}", self.window_idx + 1)
+            }
+            ModeId::Apps => {
+                if self.apps.is_empty() {
+                    return "no apps".into();
+                }
+                let n = self.apps.len() as i32;
+                self.app_idx = (self.app_idx as i32 + steps).rem_euclid(n) as usize;
+                format!("{} {}/{n}", self.apps[self.app_idx].0, self.app_idx + 1)
+            }
         }
     }
 
@@ -135,7 +195,23 @@ impl Actions {
                 self.scroll_sideways = !self.scroll_sideways;
                 (if self.scroll_sideways { "Sideways" } else { "Vertical" }).into()
             }
-            ModeId::Apps | ModeId::Windows => format!("{}: not built yet", mode.label()),
+            ModeId::Windows => {
+                let id = self.windows.get(self.window_idx).copied();
+                if let Some(id) = id {
+                    self.wm.activate(id);
+                }
+                "Window forward".into()
+            }
+            ModeId::Apps => match self.apps.get(self.app_idx).cloned() {
+                Some((name, window)) => {
+                    self.wm.activate(window);
+                    // The order changes once the app is in front; start the next pick from there.
+                    self.apps = apps(&self.wm.snapshot());
+                    self.app_idx = 0;
+                    format!("Open {name}")
+                }
+                None => "no apps".into(),
+            },
         }
     }
 
@@ -274,5 +350,42 @@ impl Actions {
         if let Err(e) = result {
             log("action", format!("SetBrightness failed: {e}"));
         }
+    }
+}
+
+/// Running apps, most recently used first, each with its most recent window.
+fn apps(snap: &Snapshot) -> Vec<(String, u32)> {
+    let mut seen: Vec<(String, u32)> = Vec::new();
+    let mut ids: Vec<&str> = Vec::new();
+    for w in &snap.windows {
+        // `windows` is most recent first, so the first window of an app is its best one.
+        if !ids.contains(&w.app_id.as_str()) {
+            ids.push(&w.app_id);
+            seen.push((app_name(&w.app_id, &w.title), w.id));
+        }
+    }
+    seen
+}
+
+fn app_name(app_id: &str, title: &str) -> String {
+    // Installed web apps have ids like "msedge-_abc123-Default"; the window title is the name.
+    if app_id.starts_with("msedge-") || app_id.starts_with("chrome-") || app_id.starts_with("brave-") {
+        let name = title.split(" - ").next().unwrap_or(title).split(" (").next().unwrap_or(title);
+        return shorten(name, 20);
+    }
+    let last = app_id.rsplit('.').next().unwrap_or(app_id);
+    let mut chars = last.chars();
+    match chars.next() {
+        Some(c) => shorten(&format!("{}{}", c.to_uppercase(), chars.as_str()), 20),
+        None => "?".into(),
+    }
+}
+
+fn shorten(s: &str, max: usize) -> String {
+    let s = s.replace('\u{200b}', "");
+    if s.chars().count() <= max {
+        s
+    } else {
+        format!("{}…", s.chars().take(max - 1).collect::<String>())
     }
 }

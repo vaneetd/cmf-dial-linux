@@ -25,12 +25,12 @@ These are hardware facts; expect them to hold on Linux, but verify:
 
 - **Phase 0 (probe): done.** Findings in `docs/phase0-findings.md`.
 - **Phase 1 (daemon): done.** `daemon/`: BlueZ transport volume (turn) and AVRCP evdev (press, double press), parking, echo filter, state machine.
-- **Phase 2 (actions): built, partly tested.** Brightness via logind, keys and scroll via uinput. Apps and Windows not built.
+- **Phase 2 (actions): built, partly tested.** Brightness via logind, keys and scroll via uinput. Workspaces, Apps and Windows use COSMIC's protocols (`daemon/src/wm.rs`); Apps has no card fan yet, only the HUD.
 - **Phase 3 (overlay): built.** Wheel and HUD pill as a layer-shell overlay (`daemon/src/ui/`). Needs Art's check with the buds.
 
 System setup done with Art's approval: rustup, `brightnessctl`, `/etc/udev/rules.d/70-dial.rules` (uaccess on the AVRCP device and `/dev/uinput`).
 
-**Next:** Art tests Phases 2 and 3 with the buds; then Apps and Windows (COSMIC toplevel protocols). **Stop at the end of every phase.**
+**Next:** Art tests Phases 2 and 3 with the buds; then the Apps card fan and the light theme. **Stop at the end of every phase.**
 
 ## Open questions to settle from the logs
 

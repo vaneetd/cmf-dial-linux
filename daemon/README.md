@@ -6,6 +6,8 @@ Captures the dial, decodes it, runs the state machine, and performs the mode act
 cargo run --release                 # with the buds (case lid closed)
 cargo run --release -- --no-buds    # drive it from the keyboard instead
 cargo test                          # decoder + state machine tests
+cargo run --release -- --snapshot DIR   # render the wheel and HUD states to PNGs
+--no-ui                             # log only, no overlay
 ```
 
 Typed into the terminal (works in both modes): `r` / `l` one detent right/left, `+3` / `-2` several,
@@ -29,3 +31,9 @@ See `../docs/phase0-findings.md`.
 | Slides | Right / Left | F5 start, Esc end |
 
 Keys and scroll are sent through two virtual devices (`dial-linux keyboard`, `dial-linux wheel`) on `/dev/uinput`.
+
+## Overlay
+
+`src/ui/`: a Wayland layer-shell surface (overlay layer, top centre, no keyboard focus, empty input region)
+drawn in software with tiny-skia, following `../dial/design/DESIGN.md` (dark theme). Maps only while the
+wheel or the HUD pill is showing. Needs a compositor with `zwlr_layer_shell_v1` (COSMIC has it).

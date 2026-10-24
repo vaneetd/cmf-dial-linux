@@ -33,6 +33,10 @@ impl Encoder {
         self.last_write = None;
     }
 
+    pub fn last_volume(&self) -> Option<u16> {
+        self.last.map(|v| v.clamp(0, 127) as u16)
+    }
+
     pub fn transport_lost(&mut self) {
         self.last = None;
         self.last_write = None;

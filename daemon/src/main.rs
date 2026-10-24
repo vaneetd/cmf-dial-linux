@@ -1,15 +1,17 @@
 //! dial-daemon: the Smart Dial on a CMF Buds Pro 2 case as events for the desktop.
 //!
-//! Capture, decode, state machine, and the mode actions (uinput keys and scroll, wpctl, brightnessctl).
-//! Apps and Windows are not built yet.
+//! Capture, decode, state machine, mode actions (uinput keys and scroll, logind brightness) and the
+//! overlay (wheel and HUD). Apps and Windows are not built yet.
 //!
 //!   --no-buds   don't touch BlueZ or evdev; drive it from stdin (r l p d, +3, -2)
+//!   --no-ui     no overlay, log only
 
 mod actions;
 mod encoder;
 mod event;
 mod machine;
 mod sources;
+mod ui;
 
 use std::time::Instant;
 
@@ -19,18 +21,36 @@ use zbus::OwnedObjectPath;
 
 use actions::Actions;
 use encoder::Encoder;
-use event::{DialEvent, log};
-use machine::{Effect, Machine};
+use event::{DialEvent, ModeId, log};
+use machine::{Effect, Machine, Phase};
 use sources::Raw;
+use ui::{UiHandle, UiMsg};
+
+struct Daemon {
+    conn: Connection,
+    machine: Machine,
+    encoder: Encoder,
+    actions: Actions,
+    ui: Option<UiHandle>,
+    transport: Option<OwnedObjectPath>,
+}
 
 #[tokio::main]
 async fn main() -> zbus::Result<()> {
-    let no_buds = std::env::args().any(|a| a == "--no-buds");
+    let args: Vec<String> = std::env::args().collect();
+    let has = |f: &str| args.iter().any(|a| a == f);
+    if let Some(i) = args.iter().position(|a| a == "--snapshot") {
+        let dir = args.get(i + 1).map_or("snapshots", |s| s.as_str());
+        return match ui::snapshot(std::path::Path::new(dir)) {
+            Ok(()) => Ok(println!("wrote snapshots to {dir}")),
+            Err(e) => Ok(eprintln!("snapshot failed: {e}")),
+        };
+    }
     let (tx, mut rx) = mpsc::unbounded_channel::<Raw>();
 
     log("daemon", "dial-daemon starting. Lid must be CLOSED for the dial to send anything. Ctrl-C to stop.");
     let conn = Connection::system().await?;
-    if !no_buds {
+    if !has("--no-buds") {
         tokio::spawn({
             let (conn, tx) = (conn.clone(), tx.clone());
             async move {
@@ -43,128 +63,164 @@ async fn main() -> zbus::Result<()> {
     }
     tokio::spawn(sources::simulated(tx.clone()));
 
-    let mut machine = Machine::new();
-    let mut encoder = Encoder::default();
-    let mut actions = Actions::new(conn.clone());
-    let mut transport: Option<OwnedObjectPath> = None;
+    let mut d = Daemon {
+        machine: Machine::new(),
+        encoder: Encoder::default(),
+        actions: Actions::new(conn.clone()),
+        ui: (!has("--no-ui")).then(ui::spawn),
+        transport: None,
+        conn,
+    };
 
     loop {
         let sleep = async {
-            match machine.deadline() {
-                Some(d) => tokio::time::sleep_until(d.into()).await,
+            match d.machine.deadline() {
+                Some(t) => tokio::time::sleep_until(t.into()).await,
                 None => std::future::pending().await,
             }
         };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = sleep => {
-                let before = machine.describe();
-                let fx = machine.tick(Instant::now());
-                if before != machine.describe() {
-                    log("state", format!("{before} → {} (idle)", machine.describe()));
+                let before = d.machine.describe();
+                let fx = d.machine.tick(Instant::now());
+                if before != d.machine.describe() {
+                    log("state", format!("{before} → {} (idle)", d.machine.describe()));
                 }
-                apply(fx, &mut encoder, &mut actions, &conn, transport.as_ref()).await;
+                d.apply(fx).await;
             }
-            Some(raw) = rx.recv() => {
-                let now = Instant::now();
-                match raw {
-                    Raw::TransportUp(path, volume) => {
-                        encoder.baseline(volume);
-                        transport = Some(path);
-                        // A reconnect while parked must park again.
-                        if machine.should_park() {
-                            encoder.set_parking(false, now);
-                            park(&mut encoder, &conn, transport.as_ref(), now).await;
-                        }
-                    }
-                    Raw::TransportDown(path) => {
-                        if transport.as_ref() == Some(&path) {
-                            transport = None;
-                            encoder.transport_lost();
-                        }
-                    }
-                    Raw::TransportVolume(v) => {
-                        let d = encoder.report(v, now);
-                        if let Some(w) = d.write {
-                            write(&conn, transport.as_ref(), w).await;
-                        }
-                        match d.steps {
-                            Some(steps) => dispatch(DialEvent::Turn(steps), "bluez", &mut machine, &mut encoder, &mut actions, &conn, transport.as_ref()).await,
-                            None => log("encoder", format!("volume {v}: echo or no change")),
-                        }
-                    }
-                    Raw::Dial(e, src) => dispatch(e, src, &mut machine, &mut encoder, &mut actions, &conn, transport.as_ref()).await,
-                }
-            }
+            Some(raw) = rx.recv() => d.on_raw(raw).await,
         }
     }
     log("daemon", "bye");
     Ok(())
 }
 
-async fn dispatch(
-    event: DialEvent,
-    source: &str,
-    machine: &mut Machine,
-    encoder: &mut Encoder,
-    actions: &mut Actions,
-    conn: &Connection,
-    transport: Option<&OwnedObjectPath>,
-) {
-    log("event", format!("{event} from {source}  [state: {}]", machine.describe()));
-    let before = machine.describe();
-    let fx = machine.handle(event, Instant::now());
-    if before != machine.describe() {
-        log("state", format!("{before} → {}", machine.describe()));
-    }
-    apply(fx, encoder, actions, conn, transport).await;
-}
-
-async fn apply(fx: Vec<Effect>, encoder: &mut Encoder, actions: &mut Actions, conn: &Connection, transport: Option<&OwnedObjectPath>) {
-    for effect in fx {
-        match effect {
-            Effect::SetParking(on) => {
-                log("park", if on { "parking at midpoint" } else { "parking off, volume free" });
-                if let Some(v) = encoder.set_parking(on, Instant::now()) {
-                    write(conn, transport, v).await;
+impl Daemon {
+    async fn on_raw(&mut self, raw: Raw) {
+        let now = Instant::now();
+        match raw {
+            Raw::TransportUp(path, volume) => {
+                self.encoder.baseline(volume);
+                self.transport = Some(path);
+                // A reconnect while parked must park again.
+                if self.machine.should_park() {
+                    self.encoder.set_parking(false, now);
+                    if let Some(v) = self.encoder.set_parking(true, now) {
+                        self.write(v).await;
+                    }
                 }
             }
-            Effect::Wheel(Some(m)) => log("wheel", format!("open, selected {}", m.label())),
-            Effect::Wheel(None) => log("wheel", "closed"),
-            Effect::Activate(m) => {
-                let hud = actions.activate(m).await;
-                log("mode", format!("{}: activate → {hud}", m.label()));
+            Raw::TransportDown(path) => {
+                if self.transport.as_ref() == Some(&path) {
+                    self.transport = None;
+                    self.encoder.transport_lost();
+                }
             }
-            Effect::Deactivate(m) => {
-                actions.deactivate(m);
-                log("mode", format!("{}: deactivate", m.label()));
+            Raw::TransportVolume(v) => {
+                let decoded = self.encoder.report(v, now);
+                if let Some(w) = decoded.write {
+                    self.write(w).await;
+                }
+                match decoded.steps {
+                    Some(steps) => {
+                        // At rest and in Volume mode the buds moved the volume themselves.
+                        if !self.machine.should_park() {
+                            self.hud(ModeId::Volume, format!("{}", (v as u32 * 100 + 63) / 127), Some(v as f32 / 127.0));
+                        }
+                        self.dispatch(DialEvent::Turn(steps), "bluez").await;
+                    }
+                    None => log("encoder", format!("volume {v}: echo or no change")),
+                }
             }
-            Effect::ModeTurn(m, n) => {
-                let hud = actions.turn(m, n).await;
-                log("mode", format!("{}: turn {n:+} → {hud}", m.label()));
-            }
-            Effect::ModePress(m) => {
-                let hud = actions.press(m).await;
-                log("mode", format!("{}: press → {hud}", m.label()));
+            Raw::Dial(e, src) => self.dispatch(e, src).await,
+        }
+    }
+
+    async fn dispatch(&mut self, event: DialEvent, source: &str) {
+        log("event", format!("{event} from {source}  [state: {}]", self.machine.describe()));
+        if event == DialEvent::Press && self.machine.phase() == Phase::Picking {
+            self.ui_send(UiMsg::Press);
+        }
+        let before = self.machine.describe();
+        let fx = self.machine.handle(event, Instant::now());
+        if before != self.machine.describe() {
+            log("state", format!("{before} → {}", self.machine.describe()));
+        }
+        self.apply(fx).await;
+    }
+
+    async fn apply(&mut self, fx: Vec<Effect>) {
+        for effect in fx {
+            match effect {
+                Effect::SetParking(on) => {
+                    log("park", if on { "parking at midpoint" } else { "parking off, volume free" });
+                    if let Some(v) = self.encoder.set_parking(on, Instant::now()) {
+                        self.write(v).await;
+                    }
+                }
+                Effect::Wheel(Some(m)) => {
+                    log("wheel", format!("open, selected {}", m.label()));
+                    self.ui_send(UiMsg::Wheel(Some(m)));
+                }
+                Effect::Wheel(None) => {
+                    log("wheel", "closed");
+                    self.ui_send(UiMsg::Wheel(None));
+                }
+                Effect::Activate(m) => {
+                    let text = self.actions.activate(m).await;
+                    log("mode", format!("{}: activate → {text}", m.label()));
+                    if m == ModeId::Volume {
+                        if let Some(v) = self.encoder.last_volume() {
+                            self.hud(m, format!("{}", (v as u32 * 100 + 63) / 127), Some(v as f32 / 127.0));
+                        }
+                    } else {
+                        self.hud(m, text, None);
+                    }
+                }
+                Effect::Deactivate(m) => {
+                    self.actions.deactivate(m);
+                    log("mode", format!("{}: deactivate", m.label()));
+                }
+                Effect::ModeTurn(m, n) => {
+                    let text = self.actions.turn(m, n).await;
+                    log("mode", format!("{}: turn {n:+} → {text}", m.label()));
+                    if m != ModeId::Volume {
+                        self.hud(m, text, None);
+                    }
+                }
+                Effect::ModePress(m) => {
+                    let text = self.actions.press(m).await;
+                    log("mode", format!("{}: press → {text}", m.label()));
+                    self.hud(m, text, None);
+                }
             }
         }
     }
-}
 
-/// Park again after a reconnect.
-async fn park(encoder: &mut Encoder, conn: &Connection, transport: Option<&OwnedObjectPath>, now: Instant) {
-    if let Some(v) = encoder.set_parking(true, now) {
-        write(conn, transport, v).await;
+    /// Sends the HUD pill. Level modes give "95%" as text; that becomes a meter and a number.
+    fn hud(&self, mode: ModeId, text: String, level: Option<f32>) {
+        let (text, level) = match (level, text.strip_suffix('%').and_then(|n| n.parse::<f32>().ok())) {
+            (None, Some(p)) => (format!("{p:.0}"), Some(p / 100.0)),
+            _ => (text, level),
+        };
+        self.ui_send(UiMsg::Hud { mode, text, level });
     }
-}
 
-async fn write(conn: &Connection, transport: Option<&OwnedObjectPath>, value: u16) {
-    let Some(path) = transport else {
-        log("park", "no transport to write to");
-        return;
-    };
-    match sources::write_transport_volume(conn, path, value).await {
-        Ok(()) => log("park", format!("wrote MediaTransport1.Volume={value}")),
-        Err(e) => log("park", format!("write failed: {e}")),
+    fn ui_send(&self, msg: UiMsg) {
+        if let Some(ui) = &self.ui {
+            ui.send(msg);
+        }
+    }
+
+    async fn write(&self, value: u16) {
+        let Some(path) = self.transport.as_ref() else {
+            log("park", "no transport to write to");
+            return;
+        };
+        match sources::write_transport_volume(&self.conn, path, value).await {
+            Ok(()) => log("park", format!("wrote MediaTransport1.Volume={value}")),
+            Err(e) => log("park", format!("write failed: {e}")),
+        }
     }
 }

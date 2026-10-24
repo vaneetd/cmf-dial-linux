@@ -39,7 +39,7 @@ impl Actions {
                 Some(p) => format!("{p}%"),
                 None => "brightness unavailable".into(),
             },
-            _ => mode.label().into(),
+            _ => String::new(),
         }
     }
 

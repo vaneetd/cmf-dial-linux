@@ -23,22 +23,14 @@ These are hardware facts; expect them to hold on Linux, but verify:
 
 ## Status
 
-**Phase 0: Probe. Built, not yet run against the buds.** `tools/dial-probe/dial_probe.py` logs three sources with ms timestamps:
+- **Phase 0 (probe): done.** Findings in `docs/phase0-findings.md`.
+- **Phase 1 (daemon): done.** `daemon/`: BlueZ transport volume (turn) and AVRCP evdev (press, double press), parking, echo filter, state machine.
+- **Phase 2 (actions): built, partly tested.** Brightness via logind, keys and scroll via uinput. Apps and Windows not built.
+- **Phase 3 (overlay): built.** Wheel and HUD pill as a layer-shell overlay (`daemon/src/ui/`). Needs Art's check with the buds.
 
-- `[bluez]` `org.bluez.MediaTransport1.Volume` (0-127) and device state over D-Bus
-- `[sink]` PipeWire sink volume via `pactl subscribe` + `pactl --format=json`
-- `[evdev]` key events from BlueZ's virtual AVRCP input device
+System setup done with Art's approval: rustup, `brightnessctl`, `/etc/udev/rules.d/70-dial.rules` (uaccess on the AVRCP device and `/dev/uinput`).
 
-Options: `--park 0.5` (park the sink volume), `--park-transport 64` (park MediaTransport1.Volume), `--evdev-match`, `--no-evdev`. See `tools/dial-probe/README.md` for the four runs Art should do.
-
-Verified so far (2026-10-24, buds connected, nothing turned or pressed yet):
-
-- Device `CMF Buds Pro 2`, MAC 3C:B0:ED:33:AA:74, connected and paired.
-- `MediaTransport1` at `/org/bluez/hci0/dev_3C_B0_ED_33_AA_74/sep1/fd0`, state `idle`, Volume 64.
-- Default sink became `bluez_output.3C_B0_ED_33_AA_74.1`, volume 0.5039 (= 64/127), so sink volume and AVRCP volume are linked.
-- AVRCP input device is `/dev/input/event12` ("CMF Buds Pro 2 (AVRCP)"), `root:input 0660`. Not readable until Art runs `sudo setfacl -m u:$USER:r /dev/input/event12` (resets on reboot; the number may change after a reconnect).
-
-**Next step:** Art runs the probe (runs A-D in the README) and pastes the logs. Then write `docs/phase0-findings.md` (turn source: transport vs sink; do press/double press arrive as evdev `KEY_PLAYPAUSE`/`KEY_NEXTSONG` or only via MPRIS; does parking work; does another media app steal the keys) and recommend the capture path. **Stop at the end of every phase** and summarise what changed and what Art should test.
+**Next:** Art tests Phases 2 and 3 with the buds; then Apps and Windows (COSMIC toplevel protocols). **Stop at the end of every phase.**
 
 ## Open questions to settle from the logs
 
